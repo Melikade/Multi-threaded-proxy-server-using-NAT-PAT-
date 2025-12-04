@@ -9,38 +9,100 @@ PROXY_PORT = 8000
 FILE_SERVER_HOST = "127.0.0.1"
 FILE_SERVER_PORT = 9000
 
-# NAT table: (client_ip, client_port) -> (proxy_ip, proxy_ephemeral_port)
-nat_table = {}
+# NAT tables:
+#   1) client -> proxy/server mapping
+#   2) proxy/server -> client mapping
+#
+# We will USE these tables INSIDE the relay threads.
+nat_client_to_server = {}  # (client_ip, client_port) -> (server_conn, proxy_ip, proxy_port)
+nat_server_to_client = {}  # (proxy_ip, proxy_port) -> (client_conn, client_ip, client_port)
+
 nat_lock = threading.Lock()
 
 
-def relay(src_sock, dst_sock, direction_label):
+def client_to_server_relay(client_conn, client_addr):
     """
-    Relay raw bytes from src_sock to dst_sock until EOF or error.
-    direction_label is just for logging, e.g. "CLIENT->SERVER" or "SERVER->CLIENT".
+    Relay data from CLIENT to SERVER using the NAT table.
+
+    Steps:
+      - Read from client_conn
+      - Use (client_ip, client_port) to find the correct server_conn in nat_client_to_server
+      - Forward data to that server_conn
     """
+    client_ip, client_port = client_addr
+    label = f"{client_ip}:{client_port} CLIENT->SERVER"
+
     try:
         while True:
-            data = src_sock.recv(4096)
+            data = client_conn.recv(4096)
             if not data:
-                # connection closed on this side
-                # print for debugging, but not too noisy
-                print(f"[RELAY {direction_label}] EOF, closing direction.")
+                print(f"[RELAY {label}] EOF from client, stopping.")
                 break
-            dst_sock.sendall(data)
+
+            # Look up the corresponding server connection via NAT table
+            with nat_lock:
+                entry = nat_client_to_server.get((client_ip, client_port))
+
+            if entry is None:
+                print(f"[RELAY {label}] No NAT entry for client, dropping data.")
+                break
+
+            server_conn, proxy_ip, proxy_port = entry
+            try:
+                server_conn.sendall(data)
+            except Exception as e:
+                print(f"[RELAY {label}] Error sending to server: {e}")
+                break
+
     except Exception as e:
-        print(f"[RELAY {direction_label}] Error: {e}")
-    finally:
-        # We just stop relaying in this direction. Closing is handled in outer handler.
-        pass
+        print(f"[RELAY {label}] Error: {e}")
+
+
+def server_to_client_relay(server_conn):
+    """
+    Relay data from SERVER to CLIENT using the NAT table.
+
+    Steps:
+      - Read from server_conn
+      - Use (proxy_ip, proxy_port) (local address of this server_conn) to find the correct client_conn
+      - Forward data to that client_conn
+    """
+    proxy_ip, proxy_port = server_conn.getsockname()
+    label = f"{proxy_ip}:{proxy_port} SERVER->CLIENT"
+
+    try:
+        while True:
+            data = server_conn.recv(4096)
+            if not data:
+                print(f"[RELAY {label}] EOF from server, stopping.")
+                break
+
+            # Look up the corresponding client connection via NAT table
+            with nat_lock:
+                entry = nat_server_to_client.get((proxy_ip, proxy_port))
+
+            if entry is None:
+                print(f"[RELAY {label}] No NAT entry for server side, dropping data.")
+                break
+
+            client_conn, client_ip, client_port = entry
+            try:
+                client_conn.sendall(data)
+            except Exception as e:
+                print(f"[RELAY {label}] Error sending to client: {e}")
+                break
+
+    except Exception as e:
+        print(f"[RELAY {label}] Error: {e}")
 
 
 def handle_client(client_conn, client_addr):
     """
     Handle a single client connection:
-      - connect to file server
-      - record NAT mapping
-      - relay data both ways using two threads
+      - Connect to file server
+      - Populate NAT tables
+      - Start two relay threads that USE the NAT tables
+      - On exit, clean up NAT entries and sockets
     """
     client_ip, client_port = client_addr
     print(f"[PROXY] Client connected from {client_ip}:{client_port}")
@@ -54,39 +116,46 @@ def handle_client(client_conn, client_addr):
         client_conn.close()
         return
 
-    # Get proxy side address used to talk to file server (this is the "NAT/PAT" port)
+    # Get the proxy's local address used toward the server (this is the PAT port)
     proxy_ip, proxy_ephemeral_port = server_conn.getsockname()
 
-    # Store NAT mapping
+    # Store NAT mappings (BOTH directions)
     with nat_lock:
-        nat_table[(client_ip, client_port)] = (proxy_ip, proxy_ephemeral_port)
-        print(f"[NAT] ADD {client_ip}:{client_port}  <-->  {proxy_ip}:{proxy_ephemeral_port}")
+        nat_client_to_server[(client_ip, client_port)] = (server_conn, proxy_ip, proxy_ephemeral_port)
+        nat_server_to_client[(proxy_ip, proxy_ephemeral_port)] = (client_conn, client_ip, client_port)
+        print(f"[NAT] ADD client {client_ip}:{client_port}  <-->  proxy {proxy_ip}:{proxy_ephemeral_port}")
 
-    # Start relay threads
+    # Start relay threads that explicitly USE the NAT table
     t1 = threading.Thread(
-        target=relay,
-        args=(client_conn, server_conn, "CLIENT->SERVER"),
+        target=client_to_server_relay,
+        args=(client_conn, client_addr),
         daemon=True
     )
     t2 = threading.Thread(
-        target=relay,
-        args=(server_conn, client_conn, "SERVER->CLIENT"),
+        target=server_to_client_relay,
+        args=(server_conn,),
         daemon=True
     )
 
     t1.start()
     t2.start()
 
-    # Wait until either direction finishes
+    # Wait for relay threads to finish
     t1.join()
     t2.join()
 
-    # Clean up
+    # Clean up NAT tables
     with nat_lock:
-        if (client_ip, client_port) in nat_table:
-            print(f"[NAT] DEL {client_ip}:{client_port}  <-->  {nat_table[(client_ip, client_port)][0]}:{nat_table[(client_ip, client_port)][1]}")
-            del nat_table[(client_ip, client_port)]
+        # Remove client->server mapping
+        if (client_ip, client_port) in nat_client_to_server:
+            entry = nat_client_to_server.pop((client_ip, client_port))
+            print(f"[NAT] DEL client {client_ip}:{client_port}  (server side was {entry[1]}:{entry[2]})")
 
+        # Remove server->client mapping
+        if (proxy_ip, proxy_ephemeral_port) in nat_server_to_client:
+            nat_server_to_client.pop((proxy_ip, proxy_ephemeral_port), None)
+
+    # Close sockets
     try:
         client_conn.close()
     except Exception:
