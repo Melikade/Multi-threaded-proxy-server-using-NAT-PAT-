@@ -3,7 +3,7 @@ import os
 
 # For now, connect directly to the file server on port 9000
 HOST = "127.0.0.1"
-PORT = 9000   # later this will be the proxy port
+PORT = 8000   # later this will be the proxy port
 
 DOWNLOAD_DIR = "./downloads"
 
