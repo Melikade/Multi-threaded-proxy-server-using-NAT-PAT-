@@ -1,101 +1,153 @@
 import socket
 import os
-import threading
 
-HOST = "127.0.0.1"   # listen on localhost; change to "0.0.0.0" if needed
-PORT = 9000          # file server port
-FILES_DIR = "./files"
+# For now, connect directly to the file server on port 9000
+HOST = "127.0.0.1"
+PORT = 9000   # later this will be the proxy port
 
-
-def handle_client(conn, addr):
-    print(f"[FILE SERVER] Connected from {addr}")
-    with conn:
-        while True:
-            # Receive a command line (up to 1024 bytes is fine for this project)
-            data = conn.recv(1024)
-            if not data:
-                # client closed connection
-                print(f"[FILE SERVER] {addr} disconnected")
-                break
-
-            line = data.decode().strip()
-            if not line:
-                continue
-
-            print(f"[FILE SERVER] Command from {addr}: {line}")
-            parts = line.split()
-            cmd = parts[0].upper()
-
-            if cmd == "LIST":
-                send_list(conn)
-
-            elif cmd == "DOWNLOAD" and len(parts) == 2:
-                filename = parts[1]
-                send_file(conn, filename)
-
-            else:
-                msg = "ERROR InvalidCommand\n"
-                conn.sendall(msg.encode())
+DOWNLOAD_DIR = "./downloads"
 
 
-def send_list(conn):
-    """Send list of files in FILES_DIR."""
-    try:
-        files = os.listdir(FILES_DIR)
-    except FileNotFoundError:
-        files = []
+def handle_list(sock_file):
+    """
+    Send LIST command and print the filenames returned by the server.
+    Protocol (from server):
+        OK
+        n
+        filename1
+        filename2
+        ...
+        END
+    or:
+        ERROR <reason>
+    """
+    # send command
+    sock_file.write(b"LIST\n")
+    sock_file.flush()
 
-    # Only regular files, no subdirectories
-    files = [f for f in files if os.path.isfile(os.path.join(FILES_DIR, f))]
-
-    # Build response
-    lines = ["OK", str(len(files))]
-    lines.extend(files)
-    lines.append("END")
-    response = "\n".join(lines) + "\n"
-    conn.sendall(response.encode())
-    print("[FILE SERVER] Sent file list")
-
-
-def send_file(conn, filename):
-    """Send a single file as: OK\\n<size>\\n<bytes> OR ERROR."""
-    path = os.path.join(FILES_DIR, filename)
-    if not os.path.isfile(path):
-        msg = "ERROR FileNotFound\n"
-        conn.sendall(msg.encode())
-        print(f"[FILE SERVER] File not found: {filename}")
+    # read first line (status)
+    status_line = sock_file.readline().decode().strip()
+    if status_line.startswith("ERROR"):
+        print("Server error on LIST:", status_line)
+        return
+    if status_line != "OK":
+        print("Unexpected response on LIST:", status_line)
         return
 
-    size = os.path.getsize(path)
-    header = f"OK\n{size}\n"
-    conn.sendall(header.encode())
+    # read number of files
+    n_line = sock_file.readline().decode().strip()
+    try:
+        n = int(n_line)
+    except ValueError:
+        print("Invalid number of files:", n_line)
+        return
 
-    print(f"[FILE SERVER] Sending file {filename} ({size} bytes)")
-    with open(path, "rb") as f:
-        while True:
-            chunk = f.read(4096)
-            if not chunk:
-                break
-            conn.sendall(chunk)
-    print(f"[FILE SERVER] Finished sending {filename}")
+    print(f"Server reports {n} file(s):")
+    for _ in range(n):
+        name = sock_file.readline().decode().strip()
+        print(" -", name)
+
+    end_line = sock_file.readline().decode().strip()
+    if end_line != "END":
+        print("Warning: expected END but got:", end_line)
+
+
+def handle_download(sock_file, filename):
+    """
+    Send DOWNLOAD <filename> command and save the file.
+    Protocol (from server):
+        OK
+        size
+        <size bytes of file>
+    or:
+        ERROR <reason>
+    """
+    # send command
+    cmd = f"DOWNLOAD {filename}\n"
+    sock_file.write(cmd.encode())
+    sock_file.flush()
+
+    # first line: status or ERROR
+    first_line = sock_file.readline().decode().strip()
+
+    if first_line.startswith("ERROR"):
+        print("Server error on DOWNLOAD:", first_line)
+        return
+
+    if first_line != "OK":
+        print("Unexpected response on DOWNLOAD:", first_line)
+        return
+
+    # second line: file size
+    size_line = sock_file.readline().decode().strip()
+    try:
+        size = int(size_line)
+    except ValueError:
+        print("Invalid size from server:", size_line)
+        return
+
+    print(f"Downloading {filename} ({size} bytes)...")
+
+    # read exactly 'size' bytes
+    remaining = size
+    chunks = []
+    while remaining > 0:
+        chunk = sock_file.read(min(4096, remaining))
+        if not chunk:
+            print("Connection closed while downloading.")
+            return
+        chunks.append(chunk)
+        remaining -= len(chunk)
+
+    data = b"".join(chunks)
+
+    # save to downloads directory
+    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+    path = os.path.join(DOWNLOAD_DIR, filename)
+    with open(path, "wb") as f:
+        f.write(data)
+
+    print(f"Saved to {path}")
 
 
 def main():
-    os.makedirs(FILES_DIR, exist_ok=True)
+    # create TCP socket and connect
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.connect((HOST, PORT))
+        print(f"Connected to server at {HOST}:{PORT}")
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        # Allow fast restart after crashes
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # wrap socket in a file-like object for easy readline()/read()
+        sock_file = sock.makefile("rwb")  # read/write in binary
 
-        s.bind((HOST, PORT))
-        s.listen()
-        print(f"[FILE SERVER] Listening on {HOST}:{PORT}")
+        try:
+            while True:
+                cmd = input("Enter command (LIST, DOWNLOAD <file>, QUIT): ").strip()
+                if not cmd:
+                    continue
 
-        while True:
-            conn, addr = s.accept()
-            # handle each client in its own thread (safe for proxy + manual tests)
-            t = threading.Thread(target=handle_client, args=(conn, addr), daemon=True)
-            t.start()
+                parts = cmd.split(maxsplit=1)
+                verb = parts[0].upper()
+
+                if verb == "QUIT":
+                    print("Closing connection.")
+                    break
+
+                elif verb == "LIST" and len(parts) == 1:
+                    handle_list(sock_file)
+
+                elif verb == "DOWNLOAD" and len(parts) == 2:
+                    filename = parts[1].strip()
+                    if not filename:
+                        print("Please provide a filename.")
+                        continue
+                    handle_download(sock_file, filename)
+
+                else:
+                    print("Invalid command. Use: LIST, DOWNLOAD <filename>, QUIT")
+
+        finally:
+            sock_file.close()
+            print("Disconnected.")
 
 
 if __name__ == "__main__":
