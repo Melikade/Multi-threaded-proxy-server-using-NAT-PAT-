@@ -6,9 +6,6 @@ PORT = 8000  # proxy port
 
 
 def handle_list(sock_file):
-    """
-    Send LIST command and print the filenames returned by the server.
-    """
     sock_file.write(b"LIST\n")
     sock_file.flush()
 
@@ -27,10 +24,9 @@ def handle_list(sock_file):
         print("Invalid number of files:", n_line)
         return
 
-    print(f"Server reports {n} file(s):")
     for _ in range(n):
         name = sock_file.readline().decode().strip()
-        print(" -", name)
+        print("File Name:", name)
 
     end_line = sock_file.readline().decode().strip()
     if end_line != "END":
@@ -38,9 +34,6 @@ def handle_list(sock_file):
 
 
 def handle_download(sock_file, filename, download_dir):
-    """
-    Send DOWNLOAD <filename> command and save the file into download_dir.
-    """
     cmd = f"DOWNLOAD {filename}\n"
     sock_file.write(cmd.encode())
     sock_file.flush()
@@ -74,7 +67,6 @@ def handle_download(sock_file, filename, download_dir):
 
     data = b"".join(chunks)
 
-    # ✅ ONLY use the per-client folder here
     os.makedirs(download_dir, exist_ok=True)
     path = os.path.join(download_dir, filename)
     with open(path, "wb") as f:
@@ -88,13 +80,11 @@ def main():
         sock.connect((HOST, PORT))
         print(f"Connected to server at {HOST}:{PORT}")
 
-        # 🔹 Per-client folder based on this client's local port
         local_ip, local_port = sock.getsockname()
         download_dir = f"./downloads/{local_port}"
         os.makedirs(download_dir, exist_ok=True)
-        print(f"Downloads for this client will go to: {download_dir}")
 
-        sock_file = sock.makefile("rwb")  # read/write in binary
+        sock_file = sock.makefile("rwb")  
 
         try:
             while True:

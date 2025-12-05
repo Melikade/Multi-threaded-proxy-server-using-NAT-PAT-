@@ -2,8 +2,8 @@ import socket
 import os
 import threading
 
-HOST = "127.0.0.1"   # listen on localhost; change to "0.0.0.0" if needed
-PORT = 9000          # file server port
+HOST = "127.0.0.1"   
+PORT = 9000          
 FILES_DIR = "./files"
 
 
@@ -11,7 +11,6 @@ def handle_client(conn, addr):
     print(f"[FILE SERVER] Connected from {addr}")
     with conn:
         while True:
-            # Receive a command line (up to 1024 bytes is fine for this project)
             data = conn.recv(1024)
             if not data:
                 # client closed connection
@@ -39,16 +38,13 @@ def handle_client(conn, addr):
 
 
 def send_list(conn):
-    """Send list of files in FILES_DIR."""
     try:
         files = os.listdir(FILES_DIR)
     except FileNotFoundError:
         files = []
 
-    # Only regular files, no subdirectories
     files = [f for f in files if os.path.isfile(os.path.join(FILES_DIR, f))]
 
-    # Build response
     lines = ["OK", str(len(files))]
     lines.extend(files)
     lines.append("END")
@@ -58,7 +54,6 @@ def send_list(conn):
 
 
 def send_file(conn, filename):
-    """Send a single file as: OK\\n<size>\\n<bytes> OR ERROR."""
     path = os.path.join(FILES_DIR, filename)
     if not os.path.isfile(path):
         msg = "ERROR FileNotFound\n"
@@ -84,16 +79,12 @@ def main():
     os.makedirs(FILES_DIR, exist_ok=True)
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        # Allow fast restart after crashes
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
         s.bind((HOST, PORT))
         s.listen()
         print(f"[FILE SERVER] Listening on {HOST}:{PORT}")
-
         while True:
             conn, addr = s.accept()
-            # handle each client in its own thread (safe for proxy + manual tests)
             t = threading.Thread(target=handle_client, args=(conn, addr), daemon=True)
             t.start()
 
