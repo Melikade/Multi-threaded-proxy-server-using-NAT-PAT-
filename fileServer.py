@@ -7,37 +7,37 @@ PORT = 9000
 FILES_DIR = "./files"
 
 
-def handle_client(conn, addr):
-    print(f"[FILE SERVER] Connected from {addr}")
-    with conn:
+def handle_client(connection, addr):
+    print(f"server Connected from {addr}")
+    with connection:
         while True:
-            data = conn.recv(1024)
+            data = connection.recv(1024)
             if not data:
                 # client closed connection
-                print(f"[FILE SERVER] {addr} disconnected")
+                print(f"server {addr} disconnected")
                 break
 
             line = data.decode().strip()
             if not line:
                 continue
 
-            print(f"[FILE SERVER] Command from {addr}: {line}")
+            print(f"server Command from {addr}: {line}")
             parts = line.split()
-            cmd = parts[0].upper()
+            command = parts[0].upper()
 
-            if cmd == "LIST":
-                send_list(conn)
+            if command == "LIST":
+                send_list(connection)
 
-            elif cmd == "DOWNLOAD" and len(parts) == 2:
+            elif command == "DOWNLOAD" and len(parts) == 2:
                 filename = parts[1]
-                send_file(conn, filename)
+                send_file(connection, filename)
 
             else:
                 msg = "ERROR InvalidCommand\n"
-                conn.sendall(msg.encode())
+                connection.sendall(msg.encode())
 
 
-def send_list(conn):
+def send_list(connection):
     try:
         files = os.listdir(FILES_DIR)
     except FileNotFoundError:
@@ -49,30 +49,30 @@ def send_list(conn):
     lines.extend(files)
     lines.append("END")
     response = "\n".join(lines) + "\n"
-    conn.sendall(response.encode())
-    print("[FILE SERVER] Sent file list")
+    connection.sendall(response.encode())
+    print("server Sent file list")
 
 
-def send_file(conn, filename):
+def send_file(connection, filename):
     path = os.path.join(FILES_DIR, filename)
     if not os.path.isfile(path):
         msg = "ERROR FileNotFound\n"
-        conn.sendall(msg.encode())
-        print(f"[FILE SERVER] File not found: {filename}")
+        connection.sendall(msg.encode())
+        print(f"server File not found: {filename}")
         return
 
     size = os.path.getsize(path)
     header = f"OK\n{size}\n"
-    conn.sendall(header.encode())
+    connection.sendall(header.encode())
 
-    print(f"[FILE SERVER] Sending file {filename} ({size} bytes)")
+    print(f"server Sending file {filename} ({size} bytes)")
     with open(path, "rb") as f:
         while True:
             chunk = f.read(4096)
             if not chunk:
                 break
-            conn.sendall(chunk)
-    print(f"[FILE SERVER] Finished sending {filename}")
+            connection.sendall(chunk)
+    print(f"server Finished sending {filename}")
 
 
 def main():
@@ -82,10 +82,10 @@ def main():
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind((HOST, PORT))
         s.listen()
-        print(f"[FILE SERVER] Listening on {HOST}:{PORT}")
+        print(f"server Listening on {HOST}:{PORT}")
         while True:
-            conn, addr = s.accept()
-            t = threading.Thread(target=handle_client, args=(conn, addr), daemon=True)
+            connection, addr = s.accept()
+            t = threading.Thread(target=handle_client, args=(connection, addr), daemon=True)
             t.start()
 
 

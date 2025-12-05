@@ -2,7 +2,7 @@ import socket
 import os
 
 HOST = "127.0.0.1"
-PORT = 8000  # proxy port
+PORT = 8000
 
 
 def handle_list(sock_file):
@@ -84,7 +84,7 @@ def main():
         download_dir = f"./downloads/{local_port}"
         os.makedirs(download_dir, exist_ok=True)
 
-        sock_file = sock.makefile("rwb")  
+        sock_file = sock.makefile("rwb")
 
         try:
             while True:
